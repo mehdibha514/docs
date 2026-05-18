@@ -1,21 +1,18 @@
 """
-PolyBot v2 — Feed prix BTC (Binance.US)
-Surveillance BTC en temps réel via le flux aggTrade Binance.US.
-Émet un signal instantané quand le prix bouge de >= CANDLE_THRESHOLD_PCT
-sur une fenêtre glissante de WINDOW_SECONDS (~1s) — pour exploiter le lag
-de l'oracle Polymarket (1-2s) avant l'ajustement du prix du marché.
+PolyBot v2 — Feed prix BTC (Coinbase)
+Surveillance BTC-USD en temps réel via le WebSocket public Coinbase
+(canal "ticker", un message par trade). Émet un signal instantané quand
+le prix bouge de >= CANDLE_THRESHOLD_PCT sur une fenêtre glissante de
+WINDOW_SECONDS (~1s) — pour exploiter le lag de l'oracle Polymarket
+(1-2s) avant l'ajustement du prix du marché.
 
-HISTORIQUE / CHOIX DE LA SOURCE :
-  - Binance.com bloque les IP US (HTTP 451) : INACCESSIBLE depuis un VPS US,
-    impossible à contourner en code (blocage côté Binance, sur l'IP).
+HISTORIQUE / POURQUOI COINBASE :
+  - Binance.com bloque les IP US (HTTP 451) → inutilisable depuis un VPS US.
   - Binance.US ne diffuse PAS les klines 1s (WS connecté mais aucune donnée).
   - Binance.US btcusdt@aggTrade est quasi mort (~1 trade / 36s) : fenêtre 1s
     famélique → move toujours 0 % → quasi aucun signal.
-  - Binance.US BTCUSD (sans T) est la paire liquide : flux aggTrade dense,
-    on reste sur Binance, et ça fonctionne depuis un VPS US.
-Pour utiliser le vrai Binance.com (source exacte de règlement Polymarket), il
-faut faire tourner le bot depuis un VPS hors US — c'est une décision infra,
-pas un changement de code (cf. BINANCE_SYMBOL / PRICE_WS_URL via .env).
+  - Coinbase BTC-USD est aux US (pas de géo-blocage), c'est le marché BTC-USD
+    le plus liquide : plusieurs trades / seconde. Feed dense et fiable.
 
 La signature de on_signal est INCHANGÉE : le reste du bot n'a pas à bouger.
 Le nom de classe BinanceWatcher est conservé pour ne pas casser les imports
@@ -36,12 +33,9 @@ import config
 
 logger = logging.getLogger("polybot.binance")
 
-# Binance.US — paire BTCUSD (liquide). Surchargeable via .env si un jour le
-# bot tourne hors US (ex: PRICE_WS_URL=wss://stream.binance.com:9443,
-# BINANCE_SYMBOL=btcusdt).
-BINANCE_WS_BASE = os.getenv("PRICE_WS_URL", "wss://stream.binance.us:9443")
-BINANCE_SYMBOL = os.getenv("BINANCE_SYMBOL", "btcusd").lower()
-WS_URL = f"{BINANCE_WS_BASE}/ws/{BINANCE_SYMBOL}@aggTrade"
+# WebSocket public Coinbase (market data, pas d'auth nécessaire pour "ticker").
+WS_URL = os.getenv("PRICE_WS_URL", "wss://ws-feed.exchange.coinbase.com")
+PRODUCT_ID = os.getenv("PRICE_PRODUCT_ID", "BTC-USD")
 
 # Fenêtre glissante du détecteur de move (secondes). 1.0 = équivalent "bougie 1s".
 WINDOW_SECONDS = float(os.getenv("MOVE_WINDOW_SECONDS", "1.0"))
@@ -83,7 +77,7 @@ class BinanceWatcher:
     async def start(self):
         self._running = True
         logger.info(
-            f"[Binance] Démarrage — source: Binance.US {BINANCE_SYMBOL}@aggTrade | "
+            f"[Binance] Démarrage — source: Coinbase {PRODUCT_ID} | "
             f"seuil: {config.CANDLE_THRESHOLD_PCT*100:.2f}% "
             f"sur fenêtre glissante {WINDOW_SECONDS:.1f}s"
         )
@@ -113,9 +107,16 @@ class BinanceWatcher:
                 heartbeat=20,
                 receive_timeout=60,
             ) as ws:
-                # Binance : le stream est dans l'URL, pas de souscription à envoyer.
+                # Coinbase exige un message de souscription après connexion.
+                await ws.send_json(
+                    {
+                        "type": "subscribe",
+                        "product_ids": [PRODUCT_ID],
+                        "channels": ["ticker"],
+                    }
+                )
                 logger.info(
-                    f"[Binance] ✅ Connecté — Binance.US {BINANCE_SYMBOL}@aggTrade actif"
+                    f"[Binance] ✅ Connecté — Coinbase {PRODUCT_ID} (ticker) actif"
                 )
                 async for msg in ws:
                     if not self._running:
@@ -132,9 +133,18 @@ class BinanceWatcher:
     async def _handle(self, raw: str):
         try:
             data = json.loads(raw)
+            mtype = data.get("type")
 
-            # flux aggTrade Binance : prix du trade dans "p"
-            price = float(data.get("p", 0))
+            # Messages de contrôle Coinbase : on log et on ignore.
+            if mtype == "subscriptions":
+                return
+            if mtype == "error":
+                logger.warning(f"[Binance] Coinbase error: {data.get('message')}")
+                return
+            if mtype != "ticker":
+                return
+
+            price = float(data.get("price", 0))
             if price <= 0:
                 return
 
