@@ -195,6 +195,15 @@ class PaperTrader:
         book = await self.get_order_book(token_id) if token_id else None
         bids = self._levels(book.get("bids") if book else None, reverse=True)
 
+        # ANTI-BUG : on ne vend JAMAIS au-dessus du bid réellement actionnable
+        # (current_price, confirmé par le WS). Le /book REST contient des ordres
+        # limites fantômes très au-dessus du vrai marché (bids périmés) — les
+        # prendre simulait des ventes à des prix qui ne s'exécuteraient jamais
+        # (ex : stop-loss qui ressortait en "profit"). On les filtre.
+        cap = current_price if (current_price and current_price > 0) else None
+        if cap is not None:
+            bids = [(px, sz) for (px, sz) in bids if px <= cap * 1.001]
+
         if bids:
             usdc = 0.0
             sold = 0.0
