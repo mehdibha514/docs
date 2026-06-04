@@ -1,0 +1,17 @@
+[Unit]
+Description=PolyBot Paper Trading
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/polybot
+ExecStart=/usr/bin/python3 -u /root/polybot/simulate.py
+Restart=always
+RestartSec=15
+StandardOutput=append:/root/polybot/polybot_paper.log
+StandardError=append:/root/polybot/polybot_paper.log
+
+[Install]
+WantedBy=multi-user.target
